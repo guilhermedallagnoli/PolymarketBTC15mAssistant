@@ -26,6 +26,7 @@ import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 import { applyGlobalProxyFromEnv } from "./net/proxy.js";
+import { createPaperTrader } from "./paper/paperTrader.js";
 
 function countVwapCrosses(closes, vwapSeries, lookback) {
   if (closes.length < lookback || vwapSeries.length < lookback) return null;
@@ -277,6 +278,33 @@ function priceToBeatFromPolymarketMarket(market) {
   return parsePriceToBeat(market);
 }
 
+function paperDashboardLines({ openTrade, stats }) {
+  const w = stats.wins;
+  const l = stats.losses;
+  const total = w + l + stats.unknown;
+  const winRate = total > 0 ? ((w / total) * 100).toFixed(0) : "-";
+  const statsStr = `${ANSI.green}W:${w}${ANSI.reset}  ${ANSI.red}L:${l}${ANSI.reset}  WR:${winRate}%  (${total} trades)`;
+
+  if (!openTrade) {
+    return [
+      kv("PAPER TRADE:", `${ANSI.gray}aguardando sinal...${ANSI.reset}`),
+      kv("Stats:", statsStr)
+    ];
+  }
+
+  const dirColor = openTrade.direction === "UP" ? ANSI.green : ANSI.red;
+  const dirArrow = openTrade.direction === "UP" ? "↑ UP" : "↓ DOWN";
+  const entryTime = openTrade.entryTime.replace("T", " ").slice(0, 19);
+  const oddsStr = openTrade.mktOdds != null ? ` @ ${openTrade.mktOdds}¢` : "";
+  const phaseStr = openTrade.phase ? ` [${openTrade.phase}${openTrade.strength ? `/${openTrade.strength}` : ""}]` : "";
+
+  return [
+    kv("PAPER TRADE:", `${dirColor}${dirArrow}${ANSI.reset}${phaseStr}${oddsStr}  entrada: ${entryTime}`),
+    kv("  PTB entry:", `$${formatNumber(openTrade.priceToBeat, 0)}  |  Chainlink: $${formatNumber(openTrade.entryPrice, 2)}`),
+    kv("Stats:", statsStr)
+  ];
+}
+
 const marketCache = {
   market: null,
   fetchedAtMs: 0
@@ -400,6 +428,7 @@ async function main() {
   const binanceStream = startBinanceTradeStream({ symbol: CONFIG.symbol });
   const polymarketLiveStream = startPolymarketChainlinkPriceStream({});
   const chainlinkStream = startChainlinkPriceStream({});
+  const paperTrader = createPaperTrader();
 
   let prevSpotPrice = null;
   let prevCurrentPrice = null;
@@ -596,6 +625,18 @@ async function main() {
       }
 
       const priceToBeat = priceToBeatState.slug === marketSlug ? priceToBeatState.value : null;
+
+      const paper = paperTrader.tick({
+        action: rec.action,
+        side: rec.side,
+        slug: marketSlug || null,
+        priceToBeat,
+        currentPrice,
+        mktOdds: rec.side === "UP" ? marketUp : marketDown,
+        phase: rec.phase,
+        strength: rec.strength ?? null,
+        edge: rec.side === "UP" ? edge.edgeUp : edge.edgeDown
+      });
       const currentPriceBaseLine = colorPriceLine({
         label: "CURRENT PRICE",
         price: currentPrice,
@@ -697,6 +738,10 @@ async function main() {
         sepLine(),
         "",
         kv("ET | Session:", `${ANSI.white}${fmtEtTime(new Date())}${ANSI.reset} | ${ANSI.white}${getBtcSession(new Date())}${ANSI.reset}`),
+        "",
+        sepLine(),
+        "",
+        ...paperDashboardLines(paper),
         "",
         sepLine(),
         centerText(`${ANSI.dim}${ANSI.gray}created by @krajekis${ANSI.reset}`, screenWidth())
